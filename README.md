@@ -25,14 +25,16 @@ SSL_KEY = "/etc/ssl/private/ssl-cert-snakeoil.key"
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
+опционально (если пакеты не скачиваются):
+pip install -r requirements.txt -i https://mirror.yandex.ru/mirrors/pypi/simple/
 
-5. Предоставляем пользователю Postgres (если требуется) права доступа к папке и файлам скриптов (изменяем путь, если необходимо):
+6. Предоставляем пользователю Postgres (если требуется) права доступа к папке и файлам скриптов (изменяем путь, если необходимо):
 chmod o+x ~ && chmod o+rx ~/CheckDB && chmod o+r ~/CheckDB/*.py
 
-6. Запускаем:
+7. Запускаем:
 sudo -u postgres ./venv/bin/python audit_db.py
 
-7. Деактивируем виртуальное окружение и удаляем созданные файлы (если требуется):
+8. Деактивируем виртуальное окружение и удаляем созданные файлы (если требуется):
 deactivate
 rm -rf audit_db.py requirements.txt venv __pycache__ .env pg_audit_flowchart.*
 

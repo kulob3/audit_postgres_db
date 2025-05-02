@@ -7,15 +7,12 @@ from rich.console import Console
 from rich.table import Table
 from rich.progress import track
 from OpenSSL import crypto
-from dotenv import load_dotenv
-
-load_dotenv()
 
 # --- Конфигурация ---
 DATA_DIR = "/var/lib/postgresql/16/main"
 BASE_DIR = os.path.join(DATA_DIR, "base")
 DB_USER = "postgres"
-DB_PASSWORD = os.getenv("DB_PASSWORD") # указать свой пароль
+DB_PASSWORD = "DB_PASSWORD" # указать свой пароль
 DB_HOST = "localhost"
 
 POSTGRES_CONF = "/etc/postgresql/16/main/postgresql.conf"

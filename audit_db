@@ -1,0 +1,171 @@
+import os
+import psycopg2
+import stat
+import ssl
+import datetime
+from rich.console import Console
+from rich.table import Table
+from rich.progress import track
+from OpenSSL import crypto
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# --- Конфигурация ---
+DATA_DIR = "/var/lib/postgresql/16/main"
+BASE_DIR = os.path.join(DATA_DIR, "base")
+DB_USER = "postgres"
+DB_PASSWORD = os.getenv("DB_PASSWORD") # указать свой пароль
+DB_HOST = "localhost"
+
+POSTGRES_CONF = "/etc/postgresql/16/main/postgresql.conf"
+HBA_CONF = "/etc/postgresql/16/main/pg_hba.conf"
+SSL_CERT = "/etc/ssl/certs/ssl-cert-snakeoil.pem"
+SSL_KEY = "/etc/ssl/private/ssl-cert-snakeoil.key"
+
+console = Console()
+
+# --- Таблица OID / размер / имя базы ---
+def fetch_oid_name_map():
+    try:
+        conn = psycopg2.connect(dbname="postgres", user=DB_USER, password=DB_PASSWORD, host=DB_HOST)
+        cur = conn.cursor()
+        cur.execute("SELECT oid, datname FROM pg_database;")
+        rows = cur.fetchall()
+        return {str(oid): name for oid, name in rows}
+    except Exception as e:
+        console.print(f"[red]Could not connect to PostgreSQL: {e}[/red]")
+        return {}
+
+def list_database_oids(base_path):
+    console.print("[bold green]\nPostgreSQL Database Disk Usage (by OID)[/bold green]")
+    if not os.path.isdir(base_path):
+        console.print(f"[red]Directory not found: {base_path}[/red]")
+        return {}
+
+    oid_name_map = fetch_oid_name_map()
+    oid_info = {}
+    table = Table(title="Databases (OID vs Name vs Size)")
+    table.add_column("OID Folder")
+    table.add_column("Database Name")
+    table.add_column("Total Size (KB)", justify="right")
+
+    for oid_dir in track(os.listdir(base_path), description="Scanning base/ directory..."):
+        full_path = os.path.join(base_path, oid_dir)
+        if os.path.isdir(full_path):
+            total_size_kb = 0
+            for dirpath, _, filenames in os.walk(full_path):
+                for f in filenames:
+                    fp = os.path.join(dirpath, f)
+                    if os.path.isfile(fp):
+                        total_size_kb += os.path.getsize(fp) // 1024
+            db_name = oid_name_map.get(oid_dir, "<unknown>")
+            table.add_row(oid_dir, db_name, str(total_size_kb))
+            oid_info[oid_dir] = db_name
+
+    console.print(table)
+    return oid_info
+
+# --- Проверка конфигурации ---
+def check_permissions(path, allowed_modes=(0o600, 0o640, 0o700)):
+    try:
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+        is_ok = mode in allowed_modes
+        return (is_ok, oct(mode))
+    except FileNotFoundError:
+        return (False, "File not found")
+
+def check_exists(path):
+    return os.path.exists(path)
+
+def check_cert_expiry(cert_path):
+    try:
+        with open(cert_path, 'rb') as f:
+            cert_data = f.read()
+        cert = crypto.load_certificate(crypto.FILETYPE_PEM, cert_data)
+        not_after = cert.get_notAfter().decode('ascii')
+        expire_date = datetime.datetime.strptime(not_after, "%Y%m%d%H%M%SZ")
+        now = datetime.datetime.utcnow()
+        if expire_date < now:
+            return False, f"Expired on {expire_date}"
+        return True, f"Valid until {expire_date}"
+    except Exception as e:
+        return False, str(e)
+
+def audit_postgresql_config():
+    results = []
+    def add_result(name, status, details):
+        results.append({"name": name, "status": "✅" if status else "❌", "details": details})
+
+    ok, mode = check_permissions(POSTGRES_CONF, (0o600, 0o640))
+    add_result("postgresql.conf permissions", ok, f"Current: {mode}")
+
+    ok, mode = check_permissions(HBA_CONF, (0o600,))
+    add_result("pg_hba.conf permissions", ok, f"Current: {mode}")
+
+    ok, mode = check_permissions(DATA_DIR, (0o700,))
+    add_result("Data directory permissions", ok, f"Current: {mode}")
+
+    add_result("SSL certificate exists", check_exists(SSL_CERT), SSL_CERT)
+
+    ok, mode = check_permissions(SSL_KEY, (0o600, 0o400))
+    add_result("SSL key permissions", ok, f"Current: {mode}")
+
+    cert_valid, cert_message = check_cert_expiry(SSL_CERT)
+    add_result("SSL certificate validity", cert_valid, cert_message)
+
+    console.print("\n[bold cyan]PostgreSQL Security Check[/bold cyan]")
+    table = Table(title="Audit Results")
+    table.add_column("Check")
+    table.add_column("Status")
+    table.add_column("Details")
+    for r in results:
+        table.add_row(r["name"], r["status"], r["details"])
+    console.print(table)
+
+# --- Аудит конкретной базы ---
+def audit_database(dbname):
+    try:
+        conn = psycopg2.connect(dbname=dbname, user=DB_USER, password=DB_PASSWORD, host=DB_HOST)
+        cur = conn.cursor()
+        table = Table(title=f"Security Audit: {dbname}")
+        table.add_column("Check")
+        table.add_column("Result")
+
+        cur.execute("SELECT rolname FROM pg_roles WHERE rolsuper = true;")
+        superusers = [row[0] for row in cur.fetchall()]
+        table.add_row("SUPERUSER roles", ", ".join(superusers) or "None")
+
+        cur.execute("SELECT rolname FROM pg_roles WHERE rolreplication = true;")
+        repl_roles = [row[0] for row in cur.fetchall()]
+        table.add_row("REPLICATION roles", ", ".join(repl_roles) or "None")
+
+        cur.execute("SELECT extname FROM pg_extension;")
+        extensions = [row[0] for row in cur.fetchall()]
+        table.add_row("Extensions", ", ".join(extensions) or "None")
+
+        cur.execute("SELECT nspname FROM pg_namespace WHERE has_schema_privilege('public', nspname, 'CREATE');")
+        public_schemas = [row[0] for row in cur.fetchall()]
+        table.add_row("Schemas with CREATE for PUBLIC", ", ".join(public_schemas) or "None")
+
+        console.print(table)
+        cur.close()
+        conn.close()
+    except Exception as e:
+        console.print(f"[red]Error auditing database {dbname}: {e}[/red]")
+
+# --- Основной цикл ---
+if __name__ == "__main__":
+    oid_map = list_database_oids(BASE_DIR)
+    audit_postgresql_config()
+
+    while True:
+        selected_oid = input("\nВведите OID базы данных для аудита (или 'exit' для выхода): ").strip()
+        if selected_oid.lower() == "exit":
+            console.print("[bold green]Завершение проверки.[/bold green]")
+            break
+        dbname = oid_map.get(selected_oid)
+        if not dbname:
+            console.print(f"[red]Неизвестный OID: {selected_oid}[/red]")
+        else:
+            audit_database(dbname)

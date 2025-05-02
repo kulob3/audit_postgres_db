@@ -7,7 +7,7 @@ sudo -u postgres psql -c "SHOW data_directory;"
 nano audit_db.py
 
 2.1. Создаем файл requirements.txt и копируем в него информацию о зависимостях
-nano audit_db.py
+nano requirements.txt
 
 3. Редактируем конфигурацию в файле audit_db.py под свою ситуацию:
 DATA_DIR = "/var/lib/postgresql/16/main"

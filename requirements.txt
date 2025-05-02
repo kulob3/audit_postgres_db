@@ -1,4 +1,3 @@
 rich
 psycopg2-binary
 pyOpenSSL
-dotenv
